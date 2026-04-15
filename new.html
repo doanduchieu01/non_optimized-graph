@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>A* Core Demo</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: sans-serif;
+    }
+
+    #map {
+      height: 100%;
+    }
+
+    .panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      width: min(360px, calc(100vw - 20px));
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #bbb;
+      border-radius: 8px;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    input,
+    select,
+    button {
+      font-size: 12px;
+      padding: 5px;
+      border-radius: 4px;
+      border: 1px solid #999;
+      box-sizing: border-box;
+      width: 100%;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #444;
+      margin: 6px 0;
+      line-height: 1.35;
+    }
+
+    .status {
+      font-size: 12px;
+      margin-top: 6px;
+      color: #222;
+    }
+
+    .stats {
+      margin-top: 6px;
+      border-top: 1px solid #ddd;
+      padding-top: 6px;
+      white-space: pre-line;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="panel">
+    <div class="grid">
+      <label for="startNode">Start</label>
+      <input id="startNode" type="number" step="1" />
+
+      <label for="goalNode">Goal</label>
+      <input id="goalNode" type="number" step="1" />
+
+      <label for="metric">Metric</label>
+      <select id="metric">
+        <option value="degrees">degrees</option>
+        <option value="meters">meters</option>
+      </select>
+
+      <label for="preset">Preset h()</label>
+      <select id="preset">
+        <option value="euclidean">euclidean</option>
+        <option value="manhattan">manhattan</option>
+        <option value="zero">zero</option>
+        <option value="haversine">haversine</option>
+      </select>
+
+      <label for="manualEnabled">Manual override</label>
+      <input id="manualEnabled" type="checkbox" />
+    </div>
+
+    <label for="manualExpr">Manual h() expression</label>
+    <input id="manualExpr" value="sqrt(dx*dx + dy*dy)" />
+
+    <div class="hint">
+      Vars: x,y,gx,gy,dx,dy,dxm,dym,node,goal,metric
+      <br />
+      Functions: sqrt,abs,pow,sin,cos,tan,asin,acos,atan,atan2,exp,log,log10,min,max,hypot,haversine
+    </div>
+
+    <button id="runBtn">Run A*</button>
+    <div id="status" class="status">Loading graph...</div>
+    <div id="stats" class="stats">No run yet.</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const EARTH_RADIUS_M = 6371008.8;
+
+    function toRad(v) {
+      return v * Math.PI / 180;
+    }
+
+    function haversineMeters(lon1, lat1, lon2, lat2) {
+      const p1 = toRad(lat1);
+      const p2 = toRad(lat2);
+      const dPhi = p2 - p1;
+      const dLambda = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dPhi / 2) ** 2 +
+        Math.cos(p1) * Math.cos(p2) * Math.sin(dLambda / 2) ** 2;
+      return 2 * EARTH_RADIUS_M * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function approxDxDyMeters(lon1, lat1, lon2, lat2) {
+      const avgLat = toRad((lat1 + lat2) / 2);
+      const dx = (lon2 - lon1) * 111320 * Math.cos(avgLat);
+      const dy = (lat2 - lat1) * 110540;
+      return { dx, dy };
+    }
+
+    function baseDistance(lon1, lat1, lon2, lat2, metric) {
+      if (metric === "meters") {
+        const d = approxDxDyMeters(lon1, lat1, lon2, lat2);
+        return Math.hypot(d.dx, d.dy);
+      }
+      return Math.hypot(lon2 - lon1, lat2 - lat1);
+    }
+
+    class MinHeap {
+      constructor() {
+        this.data = [];
+      }
+
+      get size() {
+        return this.data.length;
+      }
+
+      push(item) {
+        this.data.push(item);
+        this.up(this.data.length - 1);
+      }
+
+      pop() {
+        if (!this.data.length) return null;
+        const root = this.data[0];
+        const end = this.data.pop();
+        if (this.data.length) {
+          this.data[0] = end;
+          this.down(0);
+        }
+        return root;
+      }
+
+      less(a, b) {
+        return a.f < b.f || (a.f === b.f && a.seq < b.seq);
+      }
+
+      up(i) {
+        while (i > 0) {
+          const p = Math.floor((i - 1) / 2);
+          if (!this.less(this.data[i], this.data[p])) break;
+          [this.data[i], this.data[p]] = [this.data[p], this.data[i]];
+          i = p;
+        }
+      }
+
+      down(i) {
+        const n = this.data.length;
+        while (true) {
+          const l = i * 2 + 1;
+          const r = l + 1;
+          let s = i;
+          if (l < n && this.less(this.data[l], this.data[s])) s = l;
+          if (r < n && this.less(this.data[r], this.data[s])) s = r;
+          if (s === i) break;
+          [this.data[i], this.data[s]] = [this.data[s], this.data[i]];
+          i = s;
+        }
+      }
+    }
+
+    function compileManualHeuristic(expr, metric, nodeById) {
+      const fn = new Function(
+        "x", "y", "gx", "gy", "dx", "dy", "dxm", "dym", "node", "goal", "metric",
+        "sqrt", "abs", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+        "exp", "log", "log10", "min", "max", "hypot", "haversine",
+        "return (" + expr + ");"
+      );
+
+      return {
+        label: "manual:" + expr,
+        fn: function (node, goal) {
+          const n = nodeById.get(node);
+          const g = nodeById.get(goal);
+          const dx = Math.abs(g.lon - n.lon);
+          const dy = Math.abs(g.lat - n.lat);
+          const dm = approxDxDyMeters(n.lon, n.lat, g.lon, g.lat);
+          return Number(
+            fn(
+              n.lon,
+              n.lat,
+              g.lon,
+              g.lat,
+              dx,
+              dy,
+              Math.abs(dm.dx),
+              Math.abs(dm.dy),
+              node,
+              goal,
+              metric,
+              Math.sqrt,
+              Math.abs,
+              Math.pow,
+              Math.sin,
+              Math.cos,
+              Math.tan,
+              Math.asin,
+              Math.acos,
+              Math.atan,
+              Math.atan2,
+              Math.exp,
+              Math.log,
+              Math.log10,
+              Math.min,
+              Math.max,
+              Math.hypot,
+              haversineMeters
+            )
+          );
+        }
+      };
+    }
+
+    function compilePresetHeuristic(name, metric, nodeById) {
+      if (name === "zero") {
+        return { label: "zero", fn: function () { return 0; } };
+      }
+
+      if (name === "haversine") {
+        return {
+          label: "haversine",
+          fn: function (node, goal) {
+            const n = nodeById.get(node);
+            const g = nodeById.get(goal);
+            return haversineMeters(n.lon, n.lat, g.lon, g.lat);
+          }
+        };
+      }
+
+      if (name === "manhattan") {
+        return {
+          label: "manhattan:" + metric,
+          fn: function (node, goal) {
+            const n = nodeById.get(node);
+            const g = nodeById.get(goal);
+            if (metric === "meters") {
+              const d = approxDxDyMeters(n.lon, n.lat, g.lon, g.lat);
+              return Math.abs(d.dx) + Math.abs(d.dy);
+            }
+            return Math.abs(g.lon - n.lon) + Math.abs(g.lat - n.lat);
+          }
+        };
+      }
+
+      return {
+        label: "euclidean:" + metric,
+        fn: function (node, goal) {
+          const n = nodeById.get(node);
+          const g = nodeById.get(goal);
+          return baseDistance(n.lon, n.lat, g.lon, g.lat, metric);
+        }
+      };
+    }
+
+    function runAStar(graph, start, goal, cfg) {
+      const compiled = cfg.manualEnabled
+        ? compileManualHeuristic(cfg.manualExpr, cfg.metric, graph.nodeById)
+        : compilePresetHeuristic(cfg.preset, cfg.metric, graph.nodeById);
+
+      const heap = new MinHeap();
+      const gScore = new Map([[start, 0]]);
+      const parent = new Map([[start, null]]);
+      const closed = new Set();
+
+      let seq = 0;
+      heap.push({ id: start, f: compiled.fn(start, goal), seq });
+
+      while (heap.size > 0) {
+        const item = heap.pop();
+        const current = item.id;
+        if (closed.has(current)) continue;
+        if (current === goal) break;
+
+        closed.add(current);
+        const neighbors = graph.adjacency.get(current) || [];
+        for (const edge of neighbors) {
+          const stepCost = cfg.metric === "meters" ? edge.wMeters : edge.wDeg;
+          const tentative = gScore.get(current) + stepCost;
+          const best = gScore.has(edge.to) ? gScore.get(edge.to) : Infinity;
+          if (tentative >= best) continue;
+
+          gScore.set(edge.to, tentative);
+          parent.set(edge.to, current);
+
+          seq += 1;
+          heap.push({
+            id: edge.to,
+            f: tentative + compiled.fn(edge.to, goal),
+            seq
+          });
+        }
+      }
+
+      const path = [];
+      if (start === goal) {
+        path.push(start);
+      } else if (parent.has(goal)) {
+        let cur = goal;
+        while (cur !== null) {
+          path.push(cur);
+          cur = parent.get(cur);
+        }
+        path.reverse();
+      }
+
+      return {
+        path,
+        pathLength: gScore.has(goal) ? gScore.get(goal) : null,
+        expanded: closed.size,
+        heuristicLabel: compiled.label,
+        metric: cfg.metric
+      };
+    }
+
+    function toLineCoordinates(path, nodeById) {
+      return path.map(function (id) {
+        const n = nodeById.get(id);
+        return [n.lon, n.lat];
+      });
+    }
+
+    async function loadJson(path) {
+      const r = await fetch(path);
+      return r.json();
+    }
+
+    function buildGraph(nodesGeo, edgesGeo) {
+      const nodes = nodesGeo.features.map(function (f) {
+        return {
+          id: Number(f.properties.id),
+          lon: Number(f.geometry.coordinates[0]),
+          lat: Number(f.geometry.coordinates[1])
+        };
+      });
+
+      const nodeById = new Map(nodes.map(function (n) { return [n.id, n]; }));
+      const adjacency = new Map(nodes.map(function (n) { return [n.id, []]; }));
+
+      for (const f of edgesGeo.features) {
+        const src = Number(f.properties.source);
+        const dst = Number(f.properties.target);
+        const c = f.geometry.coordinates;
+        const lon1 = Number(c[0][0]);
+        const lat1 = Number(c[0][1]);
+        const lon2 = Number(c[1][0]);
+        const lat2 = Number(c[1][1]);
+
+        const wDeg = Number.isFinite(Number(f.properties.length_deg))
+          ? Number(f.properties.length_deg)
+          : Math.hypot(lon2 - lon1, lat2 - lat1);
+
+        const wMeters = haversineMeters(lon1, lat1, lon2, lat2);
+
+        adjacency.get(src).push({ to: dst, wDeg, wMeters });
+        adjacency.get(dst).push({ to: src, wDeg, wMeters });
+      }
+
+      return { nodes, nodeById, adjacency };
+    }
+
+    function getConfig(graph) {
+      const startInput = document.getElementById("startNode");
+      const goalInput = document.getElementById("goalNode");
+      const metricInput = document.getElementById("metric");
+      const presetInput = document.getElementById("preset");
+      const manualEnabledInput = document.getElementById("manualEnabled");
+      const manualExprInput = document.getElementById("manualExpr");
+
+      const start = Number(startInput.value);
+      const goal = Number(goalInput.value);
+      const metric = metricInput.value;
+      const preset = presetInput.value;
+
+      return {
+        start: graph.nodeById.has(start) ? start : graph.nodes[0].id,
+        goal: graph.nodeById.has(goal) ? goal : graph.nodes[graph.nodes.length - 1].id,
+        metric,
+        preset,
+        manualEnabled: manualEnabledInput.checked,
+        manualExpr: manualExprInput.value
+      };
+    }
+
+    function formatDistance(value, metric) {
+      if (value == null) return "N/A";
+      return metric === "meters" ? value.toFixed(2) + " m" : value.toFixed(6) + " deg";
+    }
+
+    async function main() {
+      const status = document.getElementById("status");
+      const stats = document.getElementById("stats");
+
+      const map = L.map("map", { preferCanvas: true }).setView([21.0509, 105.9119], 17);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 22,
+        attribution: "&copy; OpenStreetMap contributors"
+      }).addTo(map);
+
+      const nodesGeo = await loadJson("graph_nodes.geojson");
+      const edgesGeo = await loadJson("graph_edges_valid.geojson");
+      const graph = buildGraph(nodesGeo, edgesGeo);
+
+      const nodeIds = graph.nodes.map(function (n) { return n.id; }).sort(function (a, b) { return a - b; });
+      document.getElementById("startNode").value = String(nodeIds[0]);
+      document.getElementById("goalNode").value = String(nodeIds[nodeIds.length - 1]);
+
+      const nodesLayer = L.geoJSON(nodesGeo, {
+        pointToLayer: function (_, latlng) {
+          return L.circleMarker(latlng, {
+            radius: 3,
+            color: "#111",
+            weight: 1,
+            fillColor: "#fef08a",
+            fillOpacity: 0.8
+          });
+        }
+      }).addTo(map);
+
+      const edgesLayer = L.geoJSON(edgesGeo, {
+        style: { color: "#607d8b", weight: 0.8, opacity: 0.5 }
+      }).addTo(map);
+
+      const routeLayer = L.geoJSON(null, {
+        style: { color: "#11a36a", weight: 4, opacity: 0.95 }
+      }).addTo(map);
+
+      const startGoalLayer = L.geoJSON(null, {
+        pointToLayer: function (feature, latlng) {
+          const isStart = feature.properties.role === "start";
+          return L.circleMarker(latlng, {
+            radius: 7,
+            color: isStart ? "#1565c0" : "#b71c1c",
+            weight: 2,
+            fillColor: isStart ? "#42a5f5" : "#ef5350",
+            fillOpacity: 1
+          });
+        }
+      }).addTo(map);
+
+      const fit = L.featureGroup([nodesLayer, edgesLayer]);
+      if (fit.getBounds().isValid()) {
+        map.fitBounds(fit.getBounds().pad(0.08));
+      }
+
+      function render(result, cfg) {
+        routeLayer.clearLayers();
+        startGoalLayer.clearLayers();
+
+        if (result.path.length > 1) {
+          routeLayer.addData({
+            type: "Feature",
+            geometry: {
+              type: "LineString",
+              coordinates: toLineCoordinates(result.path, graph.nodeById)
+            },
+            properties: {}
+          });
+        }
+
+        const startNode = graph.nodeById.get(cfg.start);
+        const goalNode = graph.nodeById.get(cfg.goal);
+        startGoalLayer.addData({
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              geometry: { type: "Point", coordinates: [startNode.lon, startNode.lat] },
+              properties: { role: "start" }
+            },
+            {
+              type: "Feature",
+              geometry: { type: "Point", coordinates: [goalNode.lon, goalNode.lat] },
+              properties: { role: "goal" }
+            }
+          ]
+        });
+
+        stats.textContent = [
+          "heuristic: " + result.heuristicLabel,
+          "metric: " + result.metric,
+          "path nodes: " + result.path.length,
+          "path length: " + formatDistance(result.pathLength, result.metric),
+          "expanded nodes: " + result.expanded
+        ].join("\n");
+      }
+
+      function execute() {
+        try {
+          status.textContent = "Running A*...";
+          const cfg = getConfig(graph);
+
+          if (!cfg.manualEnabled && cfg.preset === "haversine" && cfg.metric !== "meters") {
+            document.getElementById("metric").value = "meters";
+            cfg.metric = "meters";
+          }
+
+          const result = runAStar(graph, cfg.start, cfg.goal, cfg);
+          render(result, cfg);
+          status.textContent = "Done";
+        } catch (err) {
+          status.textContent = "Error: " + err.message;
+        }
+      }
+
+      document.getElementById("runBtn").addEventListener("click", execute);
+      execute();
+      status.textContent = "Ready";
+    }
+
+    main().catch(function (err) {
+      document.getElementById("status").textContent = "Load error: " + err.message;
+    });
+  </script>
+</body>
+</html>
