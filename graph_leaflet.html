@@ -242,6 +242,12 @@
         <option value="meters">meters</option>
       </select>
 
+      <label for="distanceModel">Distance model</label>
+      <select id="distanceModel">
+        <option value="haversine">haversine (meter)</option>
+        <option value="euclidean">euclidean approx (meter)</option>
+      </select>
+
       <label for="heurPreset">Heuristic preset</label>
       <select id="heurPreset">
         <option value="euclidean">euclidean</option>
@@ -275,7 +281,7 @@
     <div class="stats" id="stats">No run yet.</div>
 
     <div class="footer-note">
-      URL config keys: start, goal, metric, h, manual, expr, maxExp. Latest run is persisted in localStorage.
+      URL config keys: start, goal, metric, dist, h, manual, expr, maxExp. Latest run is persisted in localStorage.
     </div>
   </aside>
 
@@ -309,6 +315,7 @@
       const goalInput = document.getElementById("goalNode");
       const maxExpInput = document.getElementById("maxExp");
       const metricSelect = document.getElementById("metricMode");
+      const distanceModelSelect = document.getElementById("distanceModel");
       const heurPresetSelect = document.getElementById("heurPreset");
       const manualHEnabledInput = document.getElementById("manualHEnabled");
       const heurExprInput = document.getElementById("heurExpr");
@@ -342,6 +349,14 @@
         const dxMeters = (lon2 - lon1) * 111320 * Math.cos(avgLat);
         const dyMeters = (lat2 - lat1) * 110540;
         return { dxMeters, dyMeters };
+      }
+
+      function meterDistanceByModel(lon1, lat1, lon2, lat2, distanceModel) {
+        if (distanceModel === "euclidean") {
+          const delta = lonLatDeltaMeters(lon1, lat1, lon2, lat2);
+          return Math.hypot(delta.dxMeters, delta.dyMeters);
+        }
+        return haversineMeters(lon1, lat1, lon2, lat2);
       }
 
       function euclideanByMetric(lon1, lat1, lon2, lat2, metric) {
@@ -469,7 +484,7 @@
             const dy = Math.abs(g.lat - n.lat);
             const deltaM = lonLatDeltaMeters(n.lon, n.lat, g.lon, g.lat);
             const base = context.metric === "meters"
-              ? haversineMeters(n.lon, n.lat, g.lon, g.lat)
+              ? meterDistanceByModel(n.lon, n.lat, g.lon, g.lat, context.distanceModel)
               : Math.hypot(dx, dy);
 
             let value;
@@ -529,16 +544,17 @@
       function compileHeuristic(config, nodeById) {
         const metric = config.metric;
         const preset = config.preset;
+        const distanceModel = config.distanceModel;
 
         if (config.useManualExpression) {
-          return compileExpressionHeuristic(config.expression, { metric, nodeById });
+          return compileExpressionHeuristic(config.expression, { metric, nodeById, distanceModel });
         }
 
         const builder = heuristicPlugins.get(preset);
         if (!builder) {
           throw new Error("Unknown heuristic preset: " + preset);
         }
-        return builder({ metric, nodeById });
+        return builder({ metric, nodeById, distanceModel });
       }
 
       function nearestNodeId(lon, lat) {
@@ -681,7 +697,9 @@
               continue;
             }
 
-            const stepCost = metric === "meters" ? edge.wMeters : edge.wDeg;
+            const stepCost = metric === "meters"
+              ? (config.distanceModel === "euclidean" ? edge.wMetersEuclidean : edge.wMetersHaversine)
+              : edge.wDeg;
             const tentative = gScore.get(current) + stepCost;
             const bestKnown = gScore.has(next) ? gScore.get(next) : Infinity;
             if (tentative >= bestKnown) {
@@ -753,6 +771,7 @@
           start: startId,
           goal: goalId,
           metric,
+          distance_model: metric === "meters" ? config.distanceModel : "degrees-euclidean",
           elapsed_sec: elapsedSec,
           expanded_nodes: closedOrder.length,
           closed_order: closedOrder,
@@ -868,6 +887,7 @@
         const lines = [
           "heuristic: " + result.heuristic_name,
           "metric: " + result.metric,
+          "distance model: " + result.distance_model,
           "start: " + result.start + " goal: " + result.goal,
           "path found: " + String(result.found),
           "path nodes: " + result.path.length,
@@ -1100,6 +1120,7 @@
           start: params.get("start"),
           goal: params.get("goal"),
           metric: params.get("metric"),
+          distanceModel: params.get("dist"),
           preset: params.get("h"),
           useManualExpression: params.get("manual"),
           expression: params.get("expr"),
@@ -1116,6 +1137,12 @@
         const goalRaw = Number(input.goal);
 
         const metric = input.metric === "meters" ? "meters" : "degrees";
+
+        const knownDistanceModels = ["haversine", "euclidean"];
+        let distanceModel = String(input.distanceModel || "haversine").toLowerCase();
+        if (!knownDistanceModels.includes(distanceModel)) {
+          distanceModel = "haversine";
+        }
 
         const knownPresets = ["euclidean", "manhattan", "zero", "haversine", "custom"];
         let preset = String(input.preset || "euclidean").toLowerCase();
@@ -1149,6 +1176,7 @@
           start,
           goal,
           metric,
+          distanceModel,
           preset,
           useManualExpression,
           expression,
@@ -1161,6 +1189,7 @@
           start: startInput.value,
           goal: goalInput.value,
           metric: metricSelect.value,
+          distanceModel: distanceModelSelect.value,
           preset: heurPresetSelect.value,
           useManualExpression: manualHEnabledInput.checked,
           expression: heurExprInput.value,
@@ -1172,6 +1201,7 @@
         startInput.value = String(config.start);
         goalInput.value = String(config.goal);
         metricSelect.value = config.metric;
+        distanceModelSelect.value = config.distanceModel;
         heurPresetSelect.value = config.preset;
         manualHEnabledInput.checked = !!config.useManualExpression;
         heurExprInput.value = config.expression;
@@ -1187,6 +1217,7 @@
         params.set("start", String(config.start));
         params.set("goal", String(config.goal));
         params.set("metric", config.metric);
+        params.set("dist", config.distanceModel);
         params.set("h", config.preset);
         params.set("manual", config.useManualExpression ? "1" : "0");
         if (config.useManualExpression) {
@@ -1203,15 +1234,16 @@
       function updateHeuristicUI() {
         const preset = heurPresetSelect.value;
         const useManual = manualHEnabledInput.checked;
+        distanceModelSelect.disabled = metricSelect.value !== "meters";
         if (useManual) {
           heurExprInput.disabled = false;
-          heurHelpEl.textContent = "Manual mode active: expression overrides preset at runtime. Use vars x,y,gx,gy,dx,dy,dxm,dym,node,goal,metric,base and functions sqrt,abs,pow,sin,cos,tan,asin,acos,atan,atan2,exp,log,log10,min,max,hypot,haversine,rad.";
+          heurHelpEl.textContent = "Manual mode active: expression overrides preset at runtime. h() must match g-unit. Vars x,y,gx,gy,dx,dy,dxm,dym,node,goal,metric,base. Functions sqrt,abs,pow,sin,cos,tan,asin,acos,atan,atan2,exp,log,log10,min,max,hypot,haversine,rad.";
         } else {
           heurExprInput.disabled = false;
           if (preset === "haversine") {
-            heurHelpEl.textContent = "Preset mode active: haversine requires metric=meters. Manual field is available but ignored until override is enabled.";
+            heurHelpEl.textContent = "Preset mode active: haversine h() requires metric=meters. Distance model controls edge step_cost in meter mode.";
           } else {
-            heurHelpEl.textContent = "Preset mode active: h() comes from the selected plugin. Manual field is available but ignored until override is enabled.";
+            heurHelpEl.textContent = "Preset mode active: h() comes from selected plugin. In meter mode, edge step_cost can use haversine or euclidean distance model.";
           }
         }
       }
@@ -1274,10 +1306,12 @@
           if (!Number.isFinite(wDeg)) {
             wDeg = degreeDistance(lon1, lat1, lon2, lat2);
           }
-          const wMeters = haversineMeters(lon1, lat1, lon2, lat2);
+          const wMetersHaversine = haversineMeters(lon1, lat1, lon2, lat2);
+          const deltaMeters = lonLatDeltaMeters(lon1, lat1, lon2, lat2);
+          const wMetersEuclidean = Math.hypot(deltaMeters.dxMeters, deltaMeters.dyMeters);
 
-          state.adjacency.get(src).push({ to: dst, wDeg, wMeters });
-          state.adjacency.get(dst).push({ to: src, wDeg, wMeters });
+          state.adjacency.get(src).push({ to: dst, wDeg, wMetersHaversine, wMetersEuclidean });
+          state.adjacency.get(dst).push({ to: src, wDeg, wMetersHaversine, wMetersEuclidean });
         }
       }
 
@@ -1324,6 +1358,10 @@
             heurPresetSelect.value = "euclidean";
             setMessage("Switched heuristic to euclidean because metric is degrees", false);
           }
+          updateHeuristicUI();
+        });
+
+        distanceModelSelect.addEventListener("change", function () {
           updateHeuristicUI();
         });
 
