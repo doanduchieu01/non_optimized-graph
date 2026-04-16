@@ -2,7 +2,8 @@
 Download the whole repo 
 
 From workspace folder: run
+
 python -m http.server 8000
 
-Open:
+then open in browser:
 http://localhost:8000/graph_leaflet.html
