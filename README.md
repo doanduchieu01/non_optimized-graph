@@ -1,5 +1,7 @@
 # non_optimized-graph
-From workspace folder:
+Download the whole repo 
+
+From workspace folder: run
 python -m http.server 8000
 
 Open:
