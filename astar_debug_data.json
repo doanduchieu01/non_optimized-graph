@@ -7,7 +7,7 @@
     "path_length": 0.003164903461412128,
     "expanded_nodes": 2,
     "relaxations": 57,
-    "elapsed_sec": 0.0007257461547851562,
+    "elapsed_sec": 0.0007658004760742188,
     "center": [
       105.91193236153846,
       21.050923165384614
@@ -17,7 +17,7 @@
     "heuristic_name": "expr:sqrt(dx*dx + dy*dy)",
     "start": 40,
     "goal": 62,
-    "elapsed_sec": 0.0007257461547851562,
+    "elapsed_sec": 0.0007658004760742188,
     "expanded_nodes": 2,
     "closed_order": [
       40,
